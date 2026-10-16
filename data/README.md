@@ -28,7 +28,7 @@ instead built from hourly bars by CME trade date (see `date` below).
 
 | Column | Type | Description |
 |---|---|---|
-| `date` | datetime64 | CME **trade date**. A session opens at 17:00 Chicago time the evening before, so Sunday-evening trading belongs to Monday. Weekdays only. |
+| `date` | datetime64 | CME **trade date**. A session opens at 17:00 Chicago time the evening before, so Sunday-evening trading belongs to Monday. Weekdays only, except one Sunday row on 2018-08-05 (no settlement). |
 | `symbol` | string | Exchange symbol, e.g. `ESH4` (H = March, M = June, U = September, Z = December; last digit = year). **Not unique across decades** (`ESH1` is 2011 and 2021); use `expiry` (with `symbol`) or `instrument_id` with `expiry` to identify a contract. |
 | `instrument_id` | uint32 | Databento's numeric contract id. **Not unique over time:** Databento reuses an id after a contract expires (for example, an expired `ESM1`'s id later belonged to a calendar spread), and bars outside a contract's listing-to-expiry life are dropped for that reason. Identify a contract by `instrument_id` plus `expiry`. |
 | `expiry` | datetime64 | Last trading day, from the contract definition (UTC date). Equity index futures expire on the third Friday of the quarterly month, except when
@@ -82,8 +82,17 @@ to get dollars. Prices are the raw, unadjusted prices of each individual contrac
 ## Coverage
 
 The full configured range (`config.yaml`: 2010-01-01 to 2025-12-31, clamped to Databento's
-first available day, 2010-06-06) has **not been downloaded yet**; only the small sample below
-has been run to check the pipeline. Running `python -m src.data --config config.yaml` with
+first available day, 2010-06-06) was downloaded for issue #4:
+
+| Product | Rows | Contracts | First date | Missing `settle` | Missing `cleared_volume` / `open_interest` | Rows after expiry | Duplicate (id, date) |
+|---|---|---|---|---|---|---|---|
+| ES | 14,514 | 40 | 2010-06-07 | 276 | 321 / 321 | 0 | 0 |
+| NQ | 11,243 | 40 | 2010-06-07 | 226 | 277 / 277 | 0 | 0 |
+| RTY | 4,670 | 37 | 2017-07-10 | 116 | 126 / 126 | 0 | 0 |
+| YM | 10,220 | 40 | 2010-06-07 | 209 | 243 / 243 | 0 | 0 |
+
+The two sample runs below match the full download except on their first day, where the sample
+misses the Sunday-evening hours before its start. Running `python -m src.data --config config.yaml` with
 no overrides downloads everything; cached chunks are reused. A shorter range can be pulled
 with `--start` / `--end`, for example `--start 2025-06-02 --end 2025-06-06` for the sample.
 
@@ -113,3 +122,91 @@ open-interest rows are mostly expiry days. All non-expiry settlements are on val
 `|close - settle| / settle` is at most 1.4%. This run is what exposed the reused-instrument-id, undated
 open interest and rounded-settlement issues described above.
 
+
+# Continuous series (issue #4)
+
+`data.build_continuous(prices, config["roll"])` turns one product's contracts (the output of
+`load_contract_prices`) into one row per trade date, holding a single contract at a time.
+Nothing is written to disk; `run_backtest.py` builds the series in memory.
+
+## Roll rule
+
+Three rules are implemented (`roll.rule` in `config.yaml`); the default is the first.
+
+- `days_before_expiry` (default, `days_before_expiry: 5`): roll at the settle N trading days
+  before expiry. Days are counted on the product's settlement calendar, so exchange holidays
+  are skipped.
+- `volume_switch`: roll at the settle of the day **after** the next contract first trades more
+  than the front. The day's volume includes the hour traded after the settlement, so acting the
+  same day would look ahead.
+- `open_interest_switch`: the same with open interest. Open interest for D is only published
+  on D+1, so it also acts one day late.
+
+For both switches the search starts after the previous roll. If the next contract never takes
+over, the roll is on the last day before expiry that both contracts settled. A missing
+next-contract settle moves a `days_before_expiry` roll back to the latest earlier day both
+contracts settled, and a switch roll forward to the next day both settled. The switches react
+to a single day's crossing, so one volume spike in the next contract can trigger an early roll.
+
+Why the default, from the full 2010-2025 data (223 rolls across ES, NQ, RTY and YM): the next
+contract first out-trades the front 5 trading days before expiry in 143 rolls, 4 days before in
+69 and 3 days before in 11. So the fixed rule rolls on the switch day or one or two days early,
+and the series holds a contract that is not the most traded one on 154 of about 13,900 days.
+The volume switch, acting a day late, rolls 2-4 days before expiry and holds the less traded
+contract on 446 days; the open-interest switch rolls 1-5 days before expiry and does so on 652
+days. Total returns differ little between the rules (ES 548.7% vs 549.0% vs 549.4%), so the
+choice is about trading the liquid contract and needing no data published after the fact.
+
+## Columns
+
+| Column | Type | Description |
+|---|---|---|
+| `date` (index) | datetime64 | Trade date. Exchange holidays (no settlement) are dropped. |
+| `symbol`, `expiry` | string, datetime64 | Contract held from the previous settle to this one. Never held on its expiry day. |
+| `settle` | float | Raw settlement price of that contract. Use it with the multiplier for sizing and P&L. |
+| `pnl_points` | float | Settle change since the previous date **in the same contract** (index points). Day after a roll: new contract's settle minus its settle on the roll day. |
+| `ret` | float | `pnl_points` divided by the previous settle of the same contract. No jump at rolls. Missing on the first row only. |
+| `adj_price` | float | Continuous price level for signals, per `adjustment` (below). The last value equals the last raw settle. |
+| `roll` | bool | True on the day the position moves to the next contract, at that day's settle. |
+| `next_symbol`, `next_settle` | string, float | On roll days only: the contract rolled into and its settle that day, i.e. the price of the roll trade. |
+| `volume` | int64 | Traded volume of the held contract. Includes trading after the settle, so lag it one day before using it in a signal. |
+| `open_interest` | Int64 | Open interest of the held contract. Published on D+1, so lag it one day before using it in a signal. |
+
+## Adjustment
+
+- `ratio_adjusted` (default): compounds `ret`, so `adj_price.pct_change() == ret`. Safe for
+  returns, volatility and the 252-day momentum signal.
+- `back_adjusted`: adds up `pnl_points`, so `adj_price.diff() == pnl_points`. The summed roll
+  gaps shift early prices a long way: the 2010 level moves from 1,048 to 1,527 for ES and from
+  1,796 to 4,733 for NQ, so percentage changes of it understate early returns (by about 2.6x
+  for NQ). Do not take percentage changes of it.
+- `unadjusted`: the raw `settle`, which jumps at every roll (e.g. about -0.4% for ES in 2010-11,
+  +0.9% in 2025).
+
+`ret` and `pnl_points` are the same under all three, so the choice only affects `adj_price`.
+Its level is rescaled with the whole sample (anchored to the last settle), so use its ratios or
+differences in signals, never its level for sizing or thresholds.
+
+## Using it in a backtest
+
+P&L on date D is the position held since D-1 times `pnl_points` times the multiplier. On a
+roll day the old contract is closed at `settle` and the new one opened at `next_settle`, so the
+position after D's settle is in `next_symbol` and should be sized at `next_settle`; on other
+days it stays in `symbol`. A roll trades both legs, so it pays costs twice.
+
+## Data issues handled
+
+- **Bad settlements:** a settle more than 50% away from the same day's close is treated as
+  missing. In the full data this only catches NQM5 on 2025-06-18 (settle 2172025.00, close
+  21732.00). Genuine settle-close gaps stay under 8%; the largest are thin back months on 2020-03-13.
+- **Missing source days:** some normal trading days have no settlement in the source and drop
+  out of that product's calendar like holidays; the next `pnl_points` and `ret` then span the
+  gap. ES and NQ have no rows at all on 2014-06-12, 2014-06-13 (days Databento flags as degraded),
+  2014-09-23 to 2014-09-25 and 2014-12-31; the June 2014 roll therefore happens on 2014-06-11.
+  YM has no rows on 2014-10-03 and trades but no settlement on 2020-02-27 and 2020-06-30.
+- **Calendars differ by product** because of these gaps (ES and NQ have 3,920 rows, YM 3,923).
+  When combining products, a product's missing day means no price, no P&L and no trade for it
+  that day; its next row carries the move.
+- **Sunday rows:** 2018-08-05 (a Sunday) has one row each for ES, NQ and YM, with 24-302
+  contracts traded and no settlement; it is dropped with the holidays.
+- **Session and time zone:** already handled in the raw data, whose dates are CME trade dates.

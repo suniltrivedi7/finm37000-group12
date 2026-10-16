@@ -3,6 +3,11 @@
 Values are CME Group contract specs for the standard (non-micro) contracts.
 Tick value is derived as ``tick_size * multiplier`` so the two can never
 disagree.
+
+Margin is an assumption, not data: CME changes performance bonds often and its
+published history (mid-2020 onwards, no RTY) covers only part of the backtest,
+so initial margin is modelled as a share of notional set in ``config.yaml``
+(``margin.pct_of_notional``, with the sources behind the value).
 """
 
 from dataclasses import dataclass
@@ -36,6 +41,10 @@ class ContractSpec:
     def notional(self, price: float, contracts: float = 1.0) -> float:
         """USD notional of ``contracts`` contracts at ``price``."""
         return price * self.multiplier * contracts
+
+    def margin(self, price: float, contracts: float, pct_of_notional: float) -> float:
+        """Approximate USD initial margin for ``contracts`` contracts at ``price``."""
+        return abs(self.notional(price, contracts)) * pct_of_notional
 
     def symbol(self, year: int, month: int) -> str:
         """Exchange-style symbol, e.g. ``symbol(2026, 3) -> 'ESH6'``."""

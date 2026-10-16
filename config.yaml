@@ -1,6 +1,6 @@
 # Strategy and backtest parameters. Strategy chosen in issue #2 (time-series
 # momentum with volatility targeting). Signal values are initial choices to be
-# tuned and stress-tested in issue #10; roll values await issue #4.
+# tuned and stress-tested in issue #10. Roll values chosen in issue #4.
 universe: [ES, NQ, RTY, YM]
 start_date: "2010-01-01"
 end_date: "2025-12-31"
@@ -16,10 +16,20 @@ signal:
   lookback_days: 252         # trailing return window (about 12 months)
   vol_lookback_days: 60      # window for the volatility estimate used in sizing
 
+# Continuous contracts (issue #4). Rolls at the settle N trading days before
+# expiry, about when volume moves to the next contract (see data/README.md).
 roll:
-  rule: days_before_expiry   # or: volume_switch, open_interest_switch
+  rule: days_before_expiry    # or: volume_switch, open_interest_switch
   days_before_expiry: 5
-  adjustment: back_adjusted  # or: ratio_adjusted, unadjusted
+  adjustment: ratio_adjusted  # or: back_adjusted, unadjusted
+
+# Initial margin (issue #4). An assumption, not data. CME's published margin
+# history only starts in mid-2020 and has no RTY, so it covers about a third of
+# the backtest. Instead margin is a share of notional: CME education material puts
+# futures margin at 3-12% of notional, and a Boston Fed study (2003) found 6.9%
+# for S&P 500 and 8.1% for Nasdaq-100 futures. Vary it (e.g. 5-12%) in #10.
+margin:
+  pct_of_notional: 0.08
 
 costs:
   commission_per_contract: 2.50  # USD, round-trip per side

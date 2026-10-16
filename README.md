@@ -20,7 +20,7 @@ values are initial choices and will be tested in the robustness work (#10).
 - **Universe:** Core: ES, NQ, RTY and YM daily futures. Extension (#10): a few international index futures (e.g., FESX, NKD) as a robustness check
 - **Signal:** Time-series momentum. Each contract is long when its trailing return is positive and short when negative, using only data known at each date
 - **Position sizing:** Volatility-targeted sizing with leverage and margin limits
-- **Contract rolling:** Systematic roll rule between expiries (to be finalized in #4)
+- **Contract rolling:** Roll 5 trading days before expiry, with ratio-adjusted continuous prices (#4; see `data/README.md`)
 - **Evaluation:** Out-of-sample testing and comparison against a volatility-matched buy-and-hold benchmark
 
 Mean reversion, carry / calendar spreads and cross-sectional momentum were considered and
@@ -75,10 +75,10 @@ python run_backtest.py --config config.yaml
 ├── .env.example        # template for API keys (copy to .env)
 ├── data/
 │   ├── raw/            # <ROOT>_daily.parquet per product (git-ignored)
-│   └── processed/      # continuous series (git-ignored)
+│   └── processed/      # derived data (git-ignored); continuous series are built in memory
 ├── notebooks/          # exploration and EDA
 ├── src/
-│   ├── contracts.py    # contract specs: multiplier, tick size, symbols
+│   ├── contracts.py    # contract specs: multiplier, tick size, symbols, margin
 │   ├── config.py       # loads config.yaml
 │   ├── data.py         # data loading and continuous contracts   (#3, #4)
 │   ├── signals.py      # signal generation                       (#6)

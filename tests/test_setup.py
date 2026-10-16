@@ -38,3 +38,10 @@ def test_symbol_and_notional():
     assert es.notional(5500.0, 2) == pytest.approx(550_000.0)
     with pytest.raises(ValueError):
         es.symbol(2026, 4)
+
+
+def test_margin_is_a_share_of_notional():
+    es = get_spec("ES")
+    pct = load_config()["margin"]["pct_of_notional"]
+    assert es.margin(5000.0, 1, pct) == pytest.approx(250_000.0 * pct)
+    assert es.margin(5000.0, -2, 0.08) == pytest.approx(40_000.0)   # shorts post margin too

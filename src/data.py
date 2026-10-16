@@ -2,7 +2,8 @@
 
 Issue #3 (this file): download raw daily data for every listed contract of each
 product in the universe from Databento and store it as one Parquet file per
-product. Issue #4 (``build_continuous``) is still a placeholder.
+product. Issue #4 (``build_continuous``) stitches those contracts into one
+continuous series per product.
 
 One command downloads everything the config asks for::
 
@@ -368,9 +369,215 @@ def load_contract_prices(root: str, start: str, end: str, raw_dir: str | Path | 
     return prices[in_range].reset_index(drop=True)
 
 
+# ---------------------------------------------------------------------------
+# Continuous contracts (issue #4)
+# ---------------------------------------------------------------------------
+
+ROLL_RULES = ("days_before_expiry", "volume_switch", "open_interest_switch")
+SWITCH_COLUMNS = {"volume_switch": "volume", "open_interest_switch": "open_interest"}
+ADJUSTMENTS = ("ratio_adjusted", "back_adjusted", "unadjusted")
+# A settle this far from the same day's close is a source error, not a price move
+# (NQM5 on 2025-06-18 settled at 2172025.00 against a close of 21732.00).
+BAD_SETTLE_TOLERANCE = 0.5
+CONTINUOUS_COLUMNS = [
+    "symbol", "expiry", "settle", "pnl_points", "ret", "adj_price",
+    "roll", "next_symbol", "next_settle", "volume", "open_interest",
+]
+
+
+def clean_settles(prices: pd.DataFrame) -> pd.DataFrame:
+    """Blank settlements that are more than ``BAD_SETTLE_TOLERANCE`` away from the close.
+
+    Genuine gaps between settle and close are a few percent at most, even for thin
+    back months, so this only catches errors in the source data.
+    """
+    bad = (prices["settle"] / prices["close"] - 1).abs() > BAD_SETTLE_TOLERANCE
+    return prices.assign(settle=prices["settle"].mask(bad))
+
+
+def settle_table(prices: pd.DataFrame) -> pd.DataFrame:
+    """Settlement price by trade date (rows) and contract expiry (columns).
+
+    Contracts are keyed by expiry because symbols repeat every decade (``ESH1``
+    is 2011 and 2021). Exchange holidays have no settlement and drop out, so the
+    index is the product's own trading calendar.
+    """
+    settled = prices.dropna(subset=["settle"])
+    return settled.pivot(index="date", columns="expiry", values="settle").sort_index(axis=1)
+
+
+def roll_dates(settles: pd.DataFrame, days_before_expiry: int) -> pd.Series:
+    """Date each contract is rolled out of, indexed by its expiry.
+
+    The roll is ``days_before_expiry`` trading days before expiry, counted on the
+    settlement calendar so holidays are skipped, and happens at that day's settle.
+    If the next contract has no settlement that day, the roll moves back to the
+    latest day on which both contracts settled. Days after the data ends are
+    counted as business days, so a contract expiring later is simply held to the end.
+    A contract with less than a full window left when the data starts gets NaT and
+    is never held.
+    """
+    calendar = settles.index
+    expiries = settles.columns
+    days = calendar.append(pd.bdate_range(calendar[-1] + pd.offsets.BDay(1), expiries.max()))
+    rolls = {}
+    for front, nxt in zip(expiries[:-1], expiries[1:]):
+        before = days[days < front]
+        if len(before) < days_before_expiry:   # expires too soon after the data starts
+            rolls[front] = pd.NaT
+            continue
+        target = before[-days_before_expiry]
+        if target > calendar[-1]:
+            rolls[front] = target
+            continue
+        both = calendar[(calendar <= target) & settles[front].notna() & settles[nxt].notna()]
+        if both.empty:
+            raise ValueError(f"No day on or before {target.date()} on which contracts expiring "
+                             f"{front.date()} and {nxt.date()} both settled.")
+        rolls[front] = both[-1]
+    out = pd.Series(list(rolls.values()), index=pd.DatetimeIndex(list(rolls), name="expiry"),
+                    name="roll_date", dtype="datetime64[ns]")
+    if not out.dropna().is_monotonic_increasing:
+        raise ValueError("Roll dates are out of order; check the contract data around the rolls.")
+    return out
+
+
+def switch_roll_dates(settles: pd.DataFrame, activity: pd.DataFrame) -> pd.Series:
+    """Roll dates for a volume or open-interest switch, indexed by expiry.
+
+    ``activity`` is volume or open interest by trade date and expiry. The roll
+    happens at the settle of the trading day **after** the next contract first
+    beats the front: open interest for D is only published on D+1, and D's volume
+    includes the hour traded after the settlement. The search starts after the
+    previous roll. If the next contract never takes over, the roll is on the last
+    day before expiry on which both contracts settled.
+    """
+    calendar = settles.index
+    expiries = settles.columns
+    activity = activity.reindex(index=calendar, columns=expiries).astype("float64")
+    rolls, previous = {}, pd.Timestamp.min
+    for front, nxt in zip(expiries[:-1], expiries[1:]):
+        window = calendar[(calendar > previous) & (calendar < front)]
+        if window.empty:
+            rolls[front] = front if previous > calendar[-1] else pd.NaT   # past the data / too late at the start
+            continue
+        ahead = activity.loc[window, nxt] > activity.loc[window, front]   # NaN compares False
+        both = settles.loc[window, front].notna() & settles.loc[window, nxt].notna()
+        act = ahead.shift(1, fill_value=False) & both
+        if act.any():
+            rolls[front] = act.idxmax()
+        elif front > calendar[-1]:
+            rolls[front] = front        # no switch yet when the data ends: held to the end
+        elif both.any():
+            rolls[front] = both[both].index[-1]
+        else:
+            raise ValueError(f"Contracts expiring {front.date()} and {nxt.date()} never both settled "
+                             "before the front expired.")
+        if pd.notna(rolls[front]):
+            previous = rolls[front]
+    return pd.Series(list(rolls.values()), index=pd.DatetimeIndex(list(rolls), name="expiry"),
+                     name="roll_date", dtype="datetime64[ns]")
+
+
+def held_expiry(calendar: pd.DatetimeIndex, rolls: pd.Series, expiries: pd.Index) -> pd.Series:
+    """Expiry of the contract held over each trade date.
+
+    A contract is held from the day after the previous roll up to and including
+    its own roll date; the switch happens at the roll date's settle. The last
+    contract in the chain has no roll date and is held after the last roll.
+    """
+    rolled = rolls.dropna()
+    chain = rolled.index.append(pd.DatetimeIndex([expiries[-1]]))
+    held = pd.Series(chain[rolled.searchsorted(calendar)], index=calendar, name="expiry")
+    if (held.to_numpy() < calendar.to_numpy()).any():
+        raise ValueError("A contract would be held past its expiry; check the contract data.")
+    return held
+
+
+def adjust_prices(cont: pd.DataFrame, adjustment: str) -> pd.Series:
+    """Continuous price level, anchored so the last value equals the last raw settle.
+
+    ``ratio_adjusted`` compounds same-contract returns, so its percentage changes
+    equal ``ret``. ``back_adjusted`` adds up point changes, so its differences equal
+    ``pnl_points``, but the summed roll gaps shift early prices a long way (NQ's 2010
+    level moves from about 1,800 to 4,700), so its percentage changes are wrong.
+    ``unadjusted`` is the raw settle and jumps at every roll.
+    """
+    last = cont["settle"].iloc[-1]
+    if adjustment == "unadjusted":
+        return cont["settle"].copy()
+    if adjustment == "ratio_adjusted":
+        growth = (1 + cont["ret"].fillna(0)).cumprod()
+        return last * growth / growth.iloc[-1]
+    steps = cont["pnl_points"].fillna(0)
+    return last - (steps.sum() - steps.cumsum())
+
+
 def build_continuous(prices: pd.DataFrame, roll_rule: dict) -> pd.DataFrame:
-    """Stitch individual contracts into one continuous series using ``roll_rule``."""
-    raise NotImplementedError("Issue #4: clean data and build continuous contracts")
+    """Stitch one product's contracts into a continuous series using ``roll_rule``.
+
+    ``prices`` is the output of ``load_contract_prices`` for one root, and
+    ``roll_rule`` is the ``roll`` block of ``config.yaml``. Returns one row per
+    trade date (index ``date``) with the contract held over that day:
+
+    * ``symbol``, ``expiry``: the contract held from the previous settle to this one
+    * ``settle``: its raw settlement price, for sizing and P&L with the multiplier
+    * ``pnl_points``, ``ret``: point and simple change since the previous settle,
+      always within the same contract, so rolls create no jumps
+    * ``adj_price``: continuous price level per ``roll_rule["adjustment"]``
+    * ``roll``: True on the day the position moves to the next contract at the
+      settle; ``next_symbol`` and ``next_settle`` give the price of the roll trade
+    * ``volume``, ``open_interest``: of the held contract. Open interest for date D
+      is only published on D+1, so lag it before using it in a signal.
+
+    Holidays (no settlement) are dropped, as are the rare days on which the held
+    contract has no settlement. Settlements that are clearly wrong in the source
+    (see ``clean_settles``) count as missing.
+    """
+    rule = roll_rule.get("rule", "days_before_expiry")
+    adjustment = roll_rule.get("adjustment", "ratio_adjusted")
+    if rule not in ROLL_RULES:
+        raise ValueError(f"Roll rule {rule!r} is not implemented; use one of {ROLL_RULES}.")
+    if adjustment not in ADJUSTMENTS:
+        raise ValueError(f"Unknown adjustment {adjustment!r}; use one of {ADJUSTMENTS}.")
+    days = roll_rule.get("days_before_expiry", 5)
+    if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+        raise ValueError(f"days_before_expiry must be a whole number of days >= 1, got {days!r}.")
+    empty = pd.DataFrame(columns=CONTINUOUS_COLUMNS, index=pd.DatetimeIndex([], name="date"))
+    if prices.empty:
+        return empty
+
+    prices = clean_settles(prices)
+    settles = settle_table(prices)
+    if settles.empty:
+        return empty
+    if rule == "days_before_expiry":
+        rolls = roll_dates(settles, days)
+    else:
+        activity = prices.pivot(index="date", columns="expiry", values=SWITCH_COLUMNS[rule])
+        rolls = switch_roll_dates(settles, activity)
+    held = held_expiry(settles.index, rolls, settles.columns)
+    nxt = pd.Series(settles.columns[1:], index=settles.columns[:-1])
+    symbols = prices.drop_duplicates("expiry").set_index("expiry")["symbol"]
+    rows = prices.set_index(["date", "expiry"])
+
+    cont = rows.reindex(pd.MultiIndex.from_arrays([held.index, held.values], names=["date", "expiry"]))
+    cont = cont[["symbol", "settle", "volume", "open_interest"]].reset_index("expiry")
+    cont = cont[cont["settle"].notna()]
+    cont["volume"] = cont["volume"].astype("int64")
+    # reindex rather than map: pandas 3 cannot map through an empty datetime Series.
+    cont["roll"] = rolls.reindex(cont["expiry"]).to_numpy() == cont.index.to_numpy()
+    next_expiry = pd.Series(nxt.reindex(cont["expiry"]).to_numpy(), index=cont.index).where(cont["roll"])
+    cont["next_symbol"] = next_expiry.map(symbols)
+    cont["next_settle"] = [settles.at[d, e] if pd.notna(e) else float("nan")
+                           for d, e in zip(cont.index, next_expiry)]
+
+    # The day after a roll is measured from the new contract's settle on the roll day.
+    base = cont["settle"].shift(1).where(~cont["roll"].shift(1, fill_value=False), cont["next_settle"].shift(1))
+    cont["pnl_points"] = cont["settle"] - base
+    cont["ret"] = cont["pnl_points"] / base
+    cont["adj_price"] = adjust_prices(cont, adjustment)
+    return cont[CONTINUOUS_COLUMNS]
 
 
 def main() -> None:
