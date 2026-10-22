@@ -199,11 +199,14 @@ days it stays in `symbol`. A roll trades both legs, so it pays costs twice.
 - **Bad settlements:** a settle more than 50% away from the same day's close is treated as
   missing. In the full data this only catches NQM5 on 2025-06-18 (settle 2172025.00, close
   21732.00). Genuine settle-close gaps stay under 8%; the largest are thin back months on 2020-03-13.
-- **Missing source days:** some normal trading days have no settlement in the source and drop
-  out of that product's calendar like holidays; the next `pnl_points` and `ret` then span the
-  gap. ES and NQ have no rows at all on 2014-06-12, 2014-06-13 (days Databento flags as degraded),
-  2014-09-23 to 2014-09-25 and 2014-12-31; the June 2014 roll therefore happens on 2014-06-11.
-  YM has no rows on 2014-10-03 and trades but no settlement on 2020-02-27 and 2020-06-30.
+- **Missing days:** some normal trading days have no row for a product and drop out of its
+  calendar like holidays; the next `pnl_points` and `ret` then span the gap, so no price move is
+  lost. ES and NQ have no rows on 2014-06-12, 2014-06-13, 2014-09-23 to 2014-09-25 and
+  2014-12-31, and YM none on 2014-10-03; the June 2014 roll therefore happens on 2014-06-11.
+  Most are source gaps (no bars and no settlement; Databento flags 2014-06-12 and 2014-09-23
+  to 2014-09-25 as degraded). But ES and NQ on 2014-06-13 and 2014-12-31, and YM on 2014-10-03,
+  do have an official settlement with no hourly bars, and `build_contract_prices` builds rows
+  from the bars, so it drops them. YM also trades but has no settlement on 2020-02-27 and 2020-06-30.
 - **Calendars differ by product** because of these gaps (ES and NQ have 3,920 rows, YM 3,923).
   When combining products, a product's missing day means no price, no P&L and no trade for it
   that day; its next row carries the move.

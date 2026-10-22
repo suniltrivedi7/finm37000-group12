@@ -50,7 +50,7 @@ pytest
 
 ## How to Run
 
-*Each step except the data download is a placeholder until its issue is merged.*
+*The figures step (#9) is still a placeholder, so `run_backtest.py` ends with a `NotImplementedError` after printing the tables.*
 
 ```bash
 # Download raw daily data for every contract in the universe (needs DATABENTO_API_KEY).
@@ -59,7 +59,9 @@ python -m src.data --config config.yaml
 # Writes data/raw/<ROOT>_daily.parquet; columns are described in data/README.md
 
 python run_backtest.py --config config.yaml
-# Results (metrics and plots) are written to ./results/
+# Prints the performance, annual-return and trading tables and saves them as CSV in results/
+
+# notebooks/05_eda.ipynb also reads data/raw, so run the download first.
 ```
 
 ## Repository Structure

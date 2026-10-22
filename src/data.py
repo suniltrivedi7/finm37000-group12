@@ -502,6 +502,9 @@ def adjust_prices(cont: pd.DataFrame, adjustment: str) -> pd.Series:
     ``pnl_points``, but the summed roll gaps shift early prices a long way (NQ's 2010
     level moves from about 1,800 to 4,700), so its percentage changes are wrong.
     ``unadjusted`` is the raw settle and jumps at every roll.
+
+    Because of the anchor, appending data shifts every earlier level, so signals
+    and P&L should use ``ret`` or ``pnl_points``, not ``adj_price`` levels.
     """
     last = cont["settle"].iloc[-1]
     if adjustment == "unadjusted":

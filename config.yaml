@@ -48,4 +48,9 @@ sizing:
   max_gross_leverage: 3.0      # sum of |notional| / capital
   max_weight_per_asset: 1.5    # |notional| / capital for any one product
 
-output_dir: results
+# Performance metrics (issue #8). Returns are net P&L over the fixed sizing.capital,
+# compared with a buy-and-hold of this product (1x capital, no compounding).
+metrics:
+  benchmark: ES
+
+output_dir: results               # metric tables (CSV), git-ignored
