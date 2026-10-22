@@ -50,8 +50,6 @@ pytest
 
 ## How to Run
 
-*The figures step (#9) is still a placeholder, so `run_backtest.py` ends with a `NotImplementedError` after printing the tables.*
-
 ```bash
 # Download raw daily data for every contract in the universe (needs DATABENTO_API_KEY).
 # Cached per product and year, so re-running does not re-download; --force refreshes.
@@ -60,6 +58,7 @@ python -m src.data --config config.yaml
 
 python run_backtest.py --config config.yaml
 # Prints the performance, annual-return and trading tables and saves them as CSV in results/
+# Saves the charts as PNG in reports/figures/
 
 # notebooks/05_eda.ipynb also reads data/raw, so run the download first.
 ```
@@ -88,7 +87,7 @@ python run_backtest.py --config config.yaml
 │   ├── backtest.py     # backtest engine                         (#7)
 │   └── analysis.py     # performance metrics and plots           (#8, #9)
 ├── tests/
-├── reports/figures/    # figures for the final report
+├── reports/figures/    # charts written by run_backtest.py
 └── results/            # backtest output (git-ignored)
 ```
 

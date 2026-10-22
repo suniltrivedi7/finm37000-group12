@@ -54,3 +54,4 @@ metrics:
   benchmark: ES
 
 output_dir: results               # metric tables (CSV), git-ignored
+figures_dir: reports/figures      # PNG charts (issue #9), tracked in git unlike results/

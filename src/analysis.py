@@ -19,8 +19,14 @@ so Sharpe and Sortino use no risk-free rate.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import matplotlib
 import numpy as np
 import pandas as pd
+from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
+from matplotlib.figure import Figure
+from matplotlib.ticker import FuncFormatter, MultipleLocator, PercentFormatter
 
 from .contracts import get_spec
 from .portfolio import settle_panel
@@ -137,6 +143,218 @@ def trading_summary(results: pd.DataFrame, prices: dict[str, pd.DataFrame], capi
     })
 
 
-def make_figures(results: pd.DataFrame, output_dir: str) -> None:
-    """Save the report figures to ``output_dir``."""
-    raise NotImplementedError("Issue #9: generate charts and visualizations")
+# Charts (issue #9). Colors are a colorblind-checked categorical order, assigned by
+# column position so a series keeps its color in every chart.
+SERIES_COLORS = ["#2a78d6", "#eb6834", "#1baf7a"]
+INK, INK_2, MUTED, GRID, AXIS, SURFACE = "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7", "#fcfcfb"
+DIVERGING = ["#b8322f", "#e34948", "#f0efec", "#2a78d6", "#1c5cab"]
+STYLE = {
+    "font.family": "sans-serif", "font.sans-serif": ["Helvetica Neue", "Arial", "DejaVu Sans"],
+    "font.size": 10, "axes.facecolor": SURFACE, "figure.facecolor": SURFACE,
+    "savefig.facecolor": SURFACE, "axes.edgecolor": AXIS, "axes.labelcolor": INK_2,
+    "xtick.color": MUTED, "ytick.color": MUTED, "axes.grid": True, "grid.color": GRID,
+    "grid.linewidth": 0.6, "axes.axisbelow": True, "axes.spines.top": False,
+    "axes.spines.right": False, "axes.titlesize": 12, "axes.titleweight": "bold",
+    "axes.titlecolor": INK, "axes.titlelocation": "left", "legend.frameon": False,
+    "lines.linewidth": 2,
+}
+MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _percent_axis(axis, decimals: int = 0) -> None:
+    axis.set_major_formatter(PercentFormatter(1.0, decimals=decimals))
+
+
+def _shade(ax, mask: pd.Series) -> None:
+    """Shade each run of True in ``mask``, from its first date up to the next date."""
+    run = mask.ne(mask.shift()).cumsum()
+    dates = mask.index
+    for _, days in mask[mask].groupby(run[mask]):
+        end = dates.get_loc(days.index[-1]) + 1
+        ax.axvspan(days.index[0], dates[min(end, len(dates) - 1)], color=GRID, alpha=0.9, linewidth=0)
+
+
+def _legend_above(ax, ncol: int, x: float = 0.0) -> None:
+    ax.legend(loc="lower left", bbox_to_anchor=(x, 1.0), ncol=ncol)
+
+
+def _cumulative(returns: pd.DataFrame, colors: dict) -> Figure:
+    fig = Figure(figsize=(9, 4.5))
+    ax = fig.subplots()
+    cum = returns.cumsum()
+    for name in returns:
+        ax.plot(cum.index, cum[name], color=colors[name], label=name)
+    _percent_axis(ax.yaxis)
+    ax.set_xlim(cum.index[0], cum.index[-1])
+    ax.set_title("Cumulative return, share of the fixed capital")
+    ax.legend(loc="upper left")
+    # Direct labels at the right edge, nudged apart so they don't overlap.
+    lo, hi = ax.get_ylim()
+    last = None
+    for value, name in sorted(((cum[n].dropna().iloc[-1], n) for n in cum), reverse=True):
+        y = value if last is None else min(value, last - 0.06 * (hi - lo))
+        last = y
+        ax.annotate(f"{name}  {value:.0%}", (cum.index[-1], y), xytext=(6, 0),
+                    textcoords="offset points", va="center", color=INK_2, fontsize=9)
+    return fig
+
+
+def _drawdowns(returns: pd.DataFrame, colors: dict) -> Figure:
+    fig = Figure(figsize=(9, 3.5))
+    ax = fig.subplots()
+    dd = drawdown(returns)
+    for name in returns:
+        ax.plot(dd.index, dd[name], color=colors[name], label=name, linewidth=1.5)
+    _percent_axis(ax.yaxis)
+    ax.set_xlim(dd.index[0], dd.index[-1])
+    ax.set_title("Drawdown from the running peak, share of capital")
+    ax.legend(loc="lower left")
+    return fig
+
+
+def _annual(returns: pd.DataFrame, colors: dict) -> Figure:
+    yearly = annual_returns(returns)
+    fig = Figure(figsize=(10, 4.2))
+    ax = fig.subplots()
+    x = np.arange(len(yearly))
+    width = 0.8 / len(yearly.columns)
+    for i, name in enumerate(yearly):
+        offset = (i - (len(yearly.columns) - 1) / 2) * width
+        ax.bar(x + offset, yearly[name], width=width - 0.03, color=colors[name], label=name,
+               edgecolor=SURFACE, linewidth=1)
+    first = returns.dropna(how="all").index[0]
+    partial = first.month != 1 or first.day > 7
+    ticks = [f"{year}*" if partial and i == 0 else str(year) for i, year in enumerate(yearly.index)]
+    ax.set_xticks(x, ticks)
+    ax.axhline(0, color=AXIS, linewidth=1)
+    ax.grid(axis="x", visible=False)
+    _percent_axis(ax.yaxis)
+    ax.set_title("Calendar-year return" + (" (*partial year)" if partial else ""), pad=28)
+    _legend_above(ax, ncol=len(yearly.columns))
+    return fig
+
+
+def _exposure(exposure: pd.DataFrame, price: pd.Series, color: str, strategy: str) -> Figure:
+    net = exposure.sum(axis=1)
+    gross = exposure.abs().sum(axis=1)
+    price = price.loc[net.index[0]:net.index[-1]]
+    fig = Figure(figsize=(9, 5.5))
+    top, bottom = fig.subplots(2, 1, sharex=True, gridspec_kw={"height_ratios": [1, 1.2]})
+    top.plot(price.index, price, color=INK_2, linewidth=1.5)
+    top.set_title(f"{price.name} (ratio-adjusted level), shaded where {strategy.lower()} is net short")
+    for ax in (top, bottom):
+        _shade(ax, net < 0)
+    bottom.plot(gross.index, gross, color=MUTED, linewidth=0.8, label="Gross (sum of |notional|)", zorder=2)
+    bottom.plot(net.index, net, color=color, linewidth=1.4, label="Net (long minus short)", zorder=3)
+    bottom.axhline(0, color=AXIS, linewidth=1)
+    bottom.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.1f}x".replace("-", "\u2212")))
+    bottom.set_xlim(net.index[0], net.index[-1])
+    bottom.set_title(f"{strategy} exposure, notional / capital")
+    _legend_above(bottom, ncol=2, x=0.45)
+    fig.tight_layout()
+    return fig
+
+
+def _rolling(returns: pd.DataFrame, colors: dict, target_vol: float | None) -> Figure:
+    window = returns.rolling(TRADING_DAYS)
+    sharpe = window.mean() / window.std() * np.sqrt(TRADING_DAYS)
+    vol = window.std() * np.sqrt(TRADING_DAYS)
+    fig = Figure(figsize=(9, 5.5))
+    top, bottom = fig.subplots(2, 1, sharex=True)
+    for name in returns:
+        top.plot(sharpe.index, sharpe[name], color=colors[name], label=name, linewidth=1.5)
+        bottom.plot(vol.index, vol[name], color=colors[name], linewidth=1.5)
+    top.axhline(0, color=AXIS, linewidth=1)
+    top.set_title("Rolling 1-year Sharpe ratio", pad=22)
+    _legend_above(top, ncol=len(returns.columns), x=0.3)
+    if target_vol is not None:
+        bottom.axhline(target_vol, color=INK_2, linewidth=1, linestyle=(0, (4, 3)))
+        bottom.annotate(f"{target_vol:.0%} target", (returns.index[0], target_vol), xytext=(4, 4),
+                        textcoords="offset points", color=INK_2, fontsize=9)
+    _percent_axis(bottom.yaxis)
+    bottom.set_xlim(returns.index[0], returns.index[-1])
+    bottom.set_title("Rolling 1-year volatility")
+    fig.tight_layout()
+    return fig
+
+
+def _monthly_heatmap(returns: pd.Series) -> Figure:
+    monthly = returns.dropna().resample("ME").sum()
+    table = (pd.DataFrame({"year": monthly.index.year, "month": monthly.index.month, "r": monthly.values})
+             .pivot(index="year", columns="month", values="r").reindex(columns=range(1, 13)))
+    values = table.to_numpy()
+    limit = np.nanmax(np.abs(values))
+    fig = Figure(figsize=(9, 0.32 * len(table) + 0.9))
+    ax = fig.subplots()
+    image = ax.imshow(values, cmap=LinearSegmentedColormap.from_list("diverging", DIVERGING),
+                      norm=TwoSlopeNorm(0, -limit, limit), aspect="auto")
+    for (i, j), v in np.ndenumerate(values):
+        if not np.isnan(v):
+            ax.text(j, i, f"{abs(v) * 100:.1f}" if round(v * 100, 1) == 0 else f"{v * 100:.1f}",
+                    ha="center", va="center", fontsize=7.5,
+                    color="white" if abs(v) > 0.6 * limit else INK)
+    ax.set_xticks(range(12), MONTHS)
+    ax.set_yticks(range(len(table)), table.index)
+    ax.grid(False)
+    ax.tick_params(length=0)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.set_title(f"{returns.name} monthly return, % of capital")
+    bar = fig.colorbar(image, ax=ax, fraction=0.03, pad=0.02, format=PercentFormatter(1.0, 0))
+    bar.outline.set_visible(False)
+    return fig
+
+
+def _distribution(returns: pd.DataFrame, colors: dict) -> Figure:
+    monthly = returns.resample("ME").sum(min_count=1)
+    edge = max(0.01, np.ceil(monthly.abs().max().max() * 100) / 100)
+    bins = np.arange(-edge, edge + 0.005, 0.01)
+    fig = Figure(figsize=(9, 3.8))
+    ax = fig.subplots()
+    for name in monthly:
+        m = monthly[name].dropna()
+        ax.hist(m, bins=bins, histtype="step", linewidth=2, color=colors[name],
+                label=f"{name} (mean {m.mean():.1%}, sd {m.std():.1%})")
+    ax.axvline(0, color=AXIS, linewidth=1)
+    ax.xaxis.set_major_locator(MultipleLocator(0.02))
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{round(v * 100):.0f}%".replace("-", "\u2212")))
+    ax.set_ylabel("Months")
+    ax.set_title("Distribution of monthly returns")
+    ax.legend(loc="upper left")
+    return fig
+
+
+def make_figures(returns: pd.DataFrame, exposure: pd.DataFrame, price: pd.Series,
+                 output_dir: str | Path, target_vol: float | None = None) -> list[Path]:
+    """Save the report figures as PNG files in ``output_dir`` and return their paths.
+
+    ``returns`` holds daily fixed-capital returns, one column per series, named
+    as they should appear in the charts. The first column is the strategy, and
+    the last is the buy-and-hold benchmark. The benchmark runs at its own
+    volatility, so it only appears in the cumulative and calendar-year charts.
+    ``exposure`` is the strategy's ``net_exposure`` and ``price`` the benchmark's
+    level (e.g. ``adj_price``), named after the product.
+    """
+    if not 2 <= len(returns.columns) <= len(SERIES_COLORS):
+        raise ValueError(f"returns needs 2 to {len(SERIES_COLORS)} columns (strategy first, "
+                         f"benchmark last), got {len(returns.columns)}")
+    colors = dict(zip(returns.columns, SERIES_COLORS))
+    strategy, matched = returns.columns[0], returns.iloc[:, :-1]
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with matplotlib.rc_context(STYLE):
+        figures = {
+            "cumulative_return": _cumulative(returns, colors),
+            "drawdown": _drawdowns(matched, colors),
+            "annual_returns": _annual(returns, colors),
+            "exposure": _exposure(exposure, price, colors[strategy], strategy),
+            "rolling_sharpe_and_vol": _rolling(matched, colors, target_vol),
+            "monthly_returns": _monthly_heatmap(returns[strategy]),
+            "return_distribution": _distribution(matched, colors),
+        }
+        paths = []
+        for name, fig in figures.items():
+            path = output_dir / f"{name}.png"
+            fig.savefig(path, dpi=150, bbox_inches="tight")
+            paths.append(path)
+    return paths

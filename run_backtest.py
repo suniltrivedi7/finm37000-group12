@@ -3,8 +3,8 @@
 Usage:
     python run_backtest.py --config config.yaml
 
-Prints the performance tables and writes them as CSV to ``output_dir``. The
-figures step still raises NotImplementedError until issue #9 is merged.
+Prints the performance tables, writes them as CSV to ``output_dir`` and saves
+the charts as PNG to ``figures_dir``.
 """
 
 import argparse
@@ -60,7 +60,16 @@ def main() -> None:
         print(f"\n{name}\n{table.astype(float).round(3).to_string()}")
         table.to_csv(output_dir / f"{name}.csv")
 
-    analysis.make_figures(results, config["output_dir"])
+    labels = {"momentum": "Momentum", "always_long": "Always long",
+              f"{bench}_buy_and_hold": f"{bench} buy-and-hold"}
+    paths = analysis.make_figures(
+        returns.rename(columns=labels),
+        analysis.net_exposure(results, prices, capital),
+        prices[bench]["adj_price"].rename(bench),
+        REPO_ROOT / config["figures_dir"],
+        target_vol=config["sizing"]["target_annual_vol"],
+    )
+    print(f"\nSaved {len(paths)} figures to {config['figures_dir']}/")
 
 
 if __name__ == "__main__":

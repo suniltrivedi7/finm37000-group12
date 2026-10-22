@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from src.analysis import (annual_returns, buy_and_hold_returns, drawdown, holding_period_days,
-                          longest_drawdown_years, net_exposure, performance_summary,
+                          longest_drawdown_years, make_figures, net_exposure, performance_summary,
                           returns_on_capital, trading_summary)
 
 
@@ -109,3 +109,26 @@ def test_trading_summary_on_a_small_book():
     assert row["days_net_short"] == pytest.approx(0.5)
     assert row["days_any_short"] == pytest.approx(0.5)
     assert row["avg_holding_days"] == pytest.approx(2.0)
+
+
+def test_make_figures_saves_every_chart(tmp_path):
+    idx = pd.bdate_range("2021-03-01", periods=600)
+    rng = np.random.default_rng(0)
+    returns = pd.DataFrame(0.0003 + 0.006 * rng.standard_normal((len(idx), 3)), index=idx,
+                           columns=["Strategy", "Always long", "ES buy-and-hold"])
+    exposure = pd.DataFrame({"ES": np.where(np.arange(len(idx)) % 200 < 150, 0.8, -0.5),
+                             "NQ": 0.3}, index=idx)
+    price = pd.Series(4000 * (1 + returns["ES buy-and-hold"]).cumprod(), name="ES")
+
+    paths = make_figures(returns, exposure, price, tmp_path / "figures", target_vol=0.10)
+    assert [p.name for p in paths] == [
+        "cumulative_return.png", "drawdown.png", "annual_returns.png", "exposure.png",
+        "rolling_sharpe_and_vol.png", "monthly_returns.png", "return_distribution.png"]
+    assert all(p.stat().st_size > 10_000 for p in paths)
+
+
+def test_make_figures_needs_a_strategy_and_a_benchmark(tmp_path):
+    one = pd.DataFrame({"Strategy": [0.01, -0.01]}, index=pd.bdate_range("2024-01-01", periods=2))
+    with pytest.raises(ValueError, match="2 to 3 columns"):
+        make_figures(one, one, one["Strategy"], tmp_path)
+
