@@ -55,3 +55,35 @@ metrics:
 
 output_dir: results               # metric tables (CSV), git-ignored
 figures_dir: reports/figures      # PNG charts (issue #9), tracked in git unlike results/
+
+# Out-of-sample testing (issue #10). Every combination of the grid below is backtested
+# once over the full sample; parameters are then chosen on data before a cut-off and
+# judged on data after it. The signal block above is the pre-chosen default.
+robustness:
+  split_date: "2019-01-01"       # in-sample is before this date, out-of-sample from it
+  walk_forward:
+    first_test_year: 2017        # first year judged out of sample
+    min_train_years: 5           # history required before choosing parameters
+  grid:                          # keys are signal parameters
+    lookback_days: [63, 126, 189, 252, 378]
+    skip_days: [0, 21]
+    vol_lookback_days: [20, 60, 120]
+  costs:                         # one-way trading cost sensitivity, per contract per fill
+    slippage_ticks: [0, 0.5, 1, 2, 3, 5, 10, 20]
+    commission_per_contract: [0, 2.5, 5, 10]
+  margin_pct: [0.05, 0.08, 0.10, 0.12]
+  vol_regime:                    # market volatility regimes, from the benchmark product
+    window: 60
+    names: [low, medium, high]
+  periods:                       # interest-rate and market eras, by start date
+    - {name: "2011-2017 near-zero rates", start: "2010-01-01"}
+    - {name: "2018-2021 hikes, then COVID", start: "2018-01-01"}
+    - {name: "2022-2025 higher rates", start: "2022-01-01"}
+  episodes:                      # stress periods (data starts June 2010, so 2008 is not covered)
+    - {name: "Euro crisis and US downgrade", start: "2011-07-22", end: "2011-10-03"}
+    - {name: "China and oil sell-off", start: "2015-08-17", end: "2016-02-11"}
+    - {name: "Q4 2018 sell-off", start: "2018-09-20", end: "2018-12-24"}
+    - {name: "COVID crash", start: "2020-02-19", end: "2020-03-23"}
+    - {name: "COVID rebound", start: "2020-03-24", end: "2020-08-31"}
+    - {name: "2022 rate-hike bear market", start: "2022-01-03", end: "2022-10-12"}
+    - {name: "2025 tariff shock", start: "2025-02-19", end: "2025-04-08"}
