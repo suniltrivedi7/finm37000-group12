@@ -276,3 +276,49 @@ def regime_summary(returns: pd.DataFrame, labels: pd.Series) -> pd.DataFrame:
                 "days": len(col), "ann_return": col.mean() * TRADING_DAYS,
                 "ann_vol": col.std() * np.sqrt(TRADING_DAYS), "sharpe": sharpe(col)}
     return pd.DataFrame(rows).T
+
+
+# --- tables for the entry point --------------------------------------------
+
+def report_tables(prices: dict[str, pd.DataFrame], config: dict, grid_returns: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """The headline robustness tables of ``notebooks/10_robustness.ipynb``, keyed by file name.
+
+    ``split``: Sharpe in and out of sample for the default, the best in-sample variant and
+    the median variant. ``walk_forward``: the variant chosen each test year. ``slippage``:
+    full-sample Sharpe against slippage. ``episodes``: return inside each stress episode.
+    The default variant is the ``signal`` block of ``config`` and must be on the grid.
+    """
+    rc = config["robustness"]
+    default_variant = {k: config["signal"][k] for k in rc["grid"]}
+    default = label(default_variant)
+    table = in_vs_out(grid_returns, rc["split_date"])
+    best = table["sharpe_in"].idxmax()
+    best_variant = variant_params([best]).iloc[0].to_dict()
+
+    split_table = pd.DataFrame({
+        "in_sample": [table.loc[default, "sharpe_in"], table.loc[best, "sharpe_in"], table["sharpe_in"].median()],
+        "out_of_sample": [table.loc[default, "sharpe_out"], table.loc[best, "sharpe_out"], table["sharpe_out"].median()],
+    }, index=["default", f"best in sample ({best})", "median of all variants"])
+    split_table["change"] = split_table["out_of_sample"] - split_table["in_sample"]
+
+    wf = rc["walk_forward"]
+    _, chosen = walk_forward(grid_returns, wf["first_test_year"], wf["min_train_years"])
+
+    books = {
+        "default": variant_positions(prices, config, default_variant),
+        "best in sample": variant_positions(prices, config, best_variant),
+        "always long (vol-targeted)": variant_positions(prices, config, default_variant, always_long=True),
+    }
+    ticks = rc["costs"]["slippage_ticks"]
+    slippage = pd.DataFrame(
+        {name: [sharpe(cost_variant(book, prices, config, slippage_ticks=t)) for t in ticks]
+         for name, book in books.items()},
+        index=pd.Index(ticks, name="slippage_ticks_per_fill"))
+
+    stress = pd.DataFrame({name: cost_variant(book, prices, config) for name, book in books.items()})
+    stress["ES buy-and-hold"] = analysis.buy_and_hold_returns(prices[config["metrics"]["benchmark"]], stress.index)
+    episodes = episode_table(stress, rc["episodes"])
+    episodes.columns = [f"{kind}: {name}" for kind, name in episodes.columns]
+
+    return {"robustness_split": split_table, "robustness_walk_forward": chosen,
+            "robustness_slippage": slippage, "robustness_episodes": episodes}

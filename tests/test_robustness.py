@@ -201,3 +201,40 @@ def test_variant_positions_override_the_signal_and_always_long_is_never_short():
     assert config["signal"]["lookback_days"] == 60                       # the caller's config is untouched
     assert (momentum["ES"] != 0).sum() == (long_only["ES"] != 0).sum() > 0     # same warm-up
     assert (long_only["ES"] >= 0).all()
+
+
+def test_report_tables_cover_split_walk_forward_costs_and_episodes():
+    idx = pd.bdate_range("2011-01-03", "2021-12-31")
+    rng = np.random.default_rng(7)
+    prices = {}
+    for root, start in (("ES", 1200.0), ("NQ", 2400.0)):
+        ret = pd.Series(0.0004 + 0.01 * rng.standard_normal(len(idx)), index=idx)
+        ret.iloc[0] = np.nan
+        settle = start * (1 + ret.fillna(0)).cumprod()
+        prices[root] = pd.DataFrame({"settle": settle, "ret": ret, "pnl_points": settle.diff(),
+                                     "adj_price": settle, "roll": False, "next_settle": np.nan})
+    config = {
+        "costs": {"commission_per_contract": 2.5, "slippage_ticks": 1},
+        "margin": {"pct_of_notional": 0.08},
+        "metrics": {"benchmark": "ES"},
+        "sizing": {"method": "volatility_target", "capital": 10_000_000,
+                   "target_annual_vol": 0.10, "max_gross_leverage": 3.0},
+        "signal": {"method": "time_series_momentum", "lookback_days": 60, "skip_days": 0,
+                   "vol_lookback_days": 30},
+        "robustness": {
+            "split_date": "2017-01-01",
+            "walk_forward": {"first_test_year": 2017, "min_train_years": 5},
+            "grid": {"lookback_days": [30, 60], "skip_days": [0], "vol_lookback_days": [30]},
+            "costs": {"slippage_ticks": [0, 1, 5]},
+            "episodes": [{"name": "crash", "start": "2020-02-19", "end": "2020-03-23"}],
+        },
+    }
+    grid_returns = robustness.run_grid(prices, config, config["robustness"]["grid"])
+    tables = robustness.report_tables(prices, config, grid_returns)
+
+    assert set(tables) == {"robustness_split", "robustness_walk_forward",
+                           "robustness_slippage", "robustness_episodes"}
+    assert list(tables["robustness_split"].columns) == ["in_sample", "out_of_sample", "change"]
+    assert list(tables["robustness_slippage"].index) == [0, 1, 5]
+    assert tables["robustness_slippage"]["default"].is_monotonic_decreasing
+    assert "return: default" in tables["robustness_episodes"].columns
